@@ -4,6 +4,7 @@ import helmet from 'helmet'
 import cookieParser from 'cookie-parser'
 import { rateLimit } from 'express-rate-limit'
 import argon2 from 'argon2'
+import crypto from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transaction } from './db.js'
@@ -27,6 +28,11 @@ if (!startupVerificationPepperConfiguration.configured) console.error('Server st
 
 app.set('trust proxy', 1)
 app.use((request, response, next) => {
+  request.requestId = crypto.randomUUID()
+  response.set('X-Request-Id', request.requestId)
+  next()
+})
+app.use((request, response, next) => {
   const origin = request.get('Origin')
   if (origin && origin === allowedOrigin) {
     response.set('Access-Control-Allow-Origin', origin)
@@ -45,8 +51,18 @@ app.use(helmet())
 app.use(express.json({ limit: '10kb' }))
 app.use(cookieParser())
 
-const startLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false, message: genericError })
-const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: genericError })
+function rateLimitResponse(request, response, options) {
+  const retryAfterSeconds = Math.ceil(options.windowMs / 1000)
+  response.status(options.statusCode).json({ error: 'Too many requests. Please wait before trying again.', code: 'rate_limited', retryAfterSeconds, requestId: request.requestId })
+}
+
+const startLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, handler: rateLimitResponse })
+const startEmailLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false, keyGenerator: (request) => normalizeEmail(typeof request.body?.email === 'string' ? request.body.email : '') || request.ip, handler: rateLimitResponse })
+const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, handler: rateLimitResponse })
+
+function safeRegistrationError(response, status, error, code, requestId) {
+  return response.status(status).json({ error, code, requestId })
+}
 
 function validRegistration(body) {
   const username = typeof body.username === 'string' ? body.username.trim() : ''
@@ -60,9 +76,9 @@ function validRegistration(body) {
 function setVerificationCookie(response, token) { response.cookie(cookieName, token, cookieOptions) }
 function clearVerificationCookie(response) { response.clearCookie(cookieName, cookieOptions) }
 
-app.post('/api/registration/start', startLimiter, async (request, response) => {
+app.post('/api/registration/start', startLimiter, startEmailLimiter, async (request, response) => {
   const registration = validRegistration(request.body || {})
-  if (!registration) return response.status(400).json(genericError)
+  if (!registration) return safeRegistrationError(response, 400, 'Please check the registration fields and try again.', 'invalid_registration', request.requestId)
   try {
     const result = await transaction(async (client) => {
       const existing = await client.query('SELECT * FROM accounts WHERE normalized_email = $1 OR normalized_username = $2 FOR UPDATE', [registration.email, registration.normalizedUsername])
@@ -79,15 +95,15 @@ app.post('/api/registration/start', startLimiter, async (request, response) => {
       }
       return { state: 'ready', email: registration.email, language: registration.language, code, token, expiresAt: expires }
     })
-    if (result.state !== 'ready') return response.status(409).json(genericError)
+    if (result.state !== 'ready') return safeRegistrationError(response, 409, 'This username or email cannot be used for a new registration.', 'registration_conflict', request.requestId)
     await sendVerificationEmail(result)
     await transaction((client) => client.query('UPDATE accounts SET code_sent_at = now() WHERE verification_session_hash = $1', [hashSecret(result.token)]))
     setVerificationCookie(response, result.token)
     return response.status(201).json({ ok: true, cooldownSeconds: 60 })
   } catch (error) {
-    if (error.code === 'EMAIL_NOT_CONFIGURED') { console.error('Registration email is not configured.'); return response.status(503).json({ error: 'Email delivery is not configured on this server.' }) }
-    console.error('Registration start failed:', error.code || error.name)
-    return response.status(500).json(genericError)
+    if (error.code === 'EMAIL_NOT_CONFIGURED') { console.error('Registration email is not configured.', { requestId: request.requestId }); return safeRegistrationError(response, 503, 'Email delivery is not configured on this server.', 'email_not_configured', request.requestId) }
+    console.error('Registration start failed:', { requestId: request.requestId, code: error.code || error.name })
+    return safeRegistrationError(response, 500, 'Registration is temporarily unavailable. Please try again later.', 'registration_failed', request.requestId)
   }
 })
 
