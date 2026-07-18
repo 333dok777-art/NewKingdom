@@ -14,7 +14,8 @@ const app = express()
 const isProduction = process.env.NODE_ENV === 'production'
 const port = Number(process.env.PORT || process.env.API_PORT || 3001)
 const cookieName = 'nk_verify'
-const cookieOptions = { httpOnly: true, sameSite: 'lax', secure: isProduction, path: '/api/registration', maxAge: CODE_TTL_MS }
+const allowedOrigin = process.env.APP_ORIGIN
+const cookieOptions = { httpOnly: true, sameSite: isProduction ? 'none' : 'lax', secure: isProduction, path: '/api/registration', maxAge: CODE_TTL_MS }
 const genericError = { error: 'Unable to complete this request. Please try again.' }
 const startupEmailConfiguration = emailConfiguration()
 
@@ -22,6 +23,21 @@ if (!startupEmailConfiguration.enabled) console.warn(`Email delivery disabled. M
 else console.info('Email delivery enabled.', { provider: 'resend', sender: startupEmailConfiguration.from, origin: startupEmailConfiguration.origin })
 
 app.set('trust proxy', 1)
+app.use((request, response, next) => {
+  const origin = request.get('Origin')
+  if (origin && origin === allowedOrigin) {
+    response.set('Access-Control-Allow-Origin', origin)
+    response.set('Access-Control-Allow-Credentials', 'true')
+    response.set('Vary', 'Origin')
+  }
+  if (request.method === 'OPTIONS' && request.path.startsWith('/api/')) {
+    if (!origin || origin !== allowedOrigin) return response.sendStatus(403)
+    response.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.set('Access-Control-Allow-Headers', 'Content-Type')
+    return response.sendStatus(204)
+  }
+  return next()
+})
 app.use(helmet())
 app.use(express.json({ limit: '10kb' }))
 app.use(cookieParser())
