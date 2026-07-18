@@ -8,7 +8,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transaction } from './db.js'
 import { runMigrations } from './migrations.js'
-import { CODE_TTL_MS, MAX_ATTEMPTS, hashSecret, newCode, newSessionToken, normalizeEmail, normalizeUsername, registrationConflict, resendState, verificationState } from './verification.js'
+import { CODE_TTL_MS, MAX_ATTEMPTS, hashSecret, newCode, newSessionToken, normalizeEmail, normalizeUsername, registrationConflict, resendState, verificationPepperConfiguration, verificationState } from './verification.js'
 import { emailConfiguration, sendVerificationEmail } from './email.js'
 
 const app = express()
@@ -19,9 +19,11 @@ const allowedOrigin = process.env.APP_ORIGIN
 const cookieOptions = { httpOnly: true, sameSite: isProduction ? 'none' : 'lax', secure: isProduction, path: '/api/registration', maxAge: CODE_TTL_MS }
 const genericError = { error: 'Unable to complete this request. Please try again.' }
 const startupEmailConfiguration = emailConfiguration()
+const startupVerificationPepperConfiguration = verificationPepperConfiguration()
 
 if (!startupEmailConfiguration.enabled) console.warn(`Email delivery disabled. Missing or invalid: ${startupEmailConfiguration.missing.join(', ')}`)
 else console.info('Email delivery enabled.', { provider: 'resend', sender: startupEmailConfiguration.from, origin: startupEmailConfiguration.origin })
+if (!startupVerificationPepperConfiguration.configured) console.error('Server startup blocked: VERIFICATION_CODE_PEPPER must be set to a random value of at least 32 characters.')
 
 app.set('trust proxy', 1)
 app.use((request, response, next) => {
@@ -144,6 +146,10 @@ if (isProduction) {
 }
 async function startServer() {
   try {
+    if (!startupVerificationPepperConfiguration.configured) {
+      process.exitCode = 1
+      return
+    }
     const applied = await runMigrations()
     console.info('Database schema ready.', { appliedMigrations: applied.length })
     app.listen(port, () => console.log(`NewKingdom API listening on ${port}`))

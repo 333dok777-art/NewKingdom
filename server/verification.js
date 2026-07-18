@@ -9,7 +9,19 @@ export const normalizeEmail = (value) => value.trim().toLowerCase()
 export const normalizeUsername = (value) => value.trim().toLowerCase()
 export const newCode = () => String(crypto.randomInt(100000, 1000000))
 export const newSessionToken = () => crypto.randomBytes(32).toString('base64url')
-export const hashSecret = (value) => crypto.createHmac('sha256', process.env.VERIFICATION_CODE_PEPPER).update(value).digest('hex')
+export function verificationPepperConfiguration() {
+  const pepper = process.env.VERIFICATION_CODE_PEPPER
+  return { configured: typeof pepper === 'string' && pepper.length >= 32 }
+}
+export function hashSecret(value) {
+  const pepper = process.env.VERIFICATION_CODE_PEPPER
+  if (typeof pepper !== 'string' || pepper.length < 32) {
+    const error = new Error('Verification code pepper is not configured')
+    error.code = 'VERIFICATION_PEPPER_NOT_CONFIGURED'
+    throw error
+  }
+  return crypto.createHmac('sha256', pepper).update(value).digest('hex')
+}
 export const safeEqual = (left, right) => crypto.timingSafeEqual(Buffer.from(left), Buffer.from(right))
 
 export function verificationState(account, code, now = new Date()) {

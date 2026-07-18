@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 process.env.VERIFICATION_CODE_PEPPER = 'test-pepper-only-not-for-production'
-const { MAX_ATTEMPTS, hashSecret, registrationConflict, resendState, verificationState } = await import('../server/verification.js')
+const { MAX_ATTEMPTS, hashSecret, registrationConflict, resendState, verificationPepperConfiguration, verificationState } = await import('../server/verification.js')
 const { buildVerificationEmail } = await import('../server/email.js')
 
 function account(overrides = {}) {
@@ -11,6 +11,14 @@ function account(overrides = {}) {
 
 test('expired codes are rejected', () => {
   assert.equal(verificationState(account({ code_expires_at: new Date(Date.now() - 1) }), '123456'), 'expired')
+})
+
+test('verification pepper must be configured before secret hashing', () => {
+  const previous = process.env.VERIFICATION_CODE_PEPPER
+  delete process.env.VERIFICATION_CODE_PEPPER
+  assert.equal(verificationPepperConfiguration().configured, false)
+  assert.throws(() => hashSecret('123456'), { code: 'VERIFICATION_PEPPER_NOT_CONFIGURED' })
+  process.env.VERIFICATION_CODE_PEPPER = previous
 })
 
 test('wrong-code attempt limit locks verification', () => {

@@ -9,6 +9,8 @@
 
 `RESEND_API_KEY` and `EMAIL_FROM` are required to send verification messages. The API returns a clear configuration error if they are missing; it never fakes successful email delivery.
 
+`VERIFICATION_CODE_PEPPER` is required and must be a random value of at least 32 characters. The production server refuses to start without it, because changing or generating this secret at runtime would invalidate verification-code hashes.
+
 ## Commands
 
 - `npm run dev` — Vite and Express together
