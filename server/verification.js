@@ -13,6 +13,7 @@ export function verificationPepperConfiguration() {
   const pepper = process.env.VERIFICATION_CODE_PEPPER
   return { configured: typeof pepper === 'string' && pepper.length >= 32 }
 }
+export const emailVerificationBypassEnabled = () => process.env.BYPASS_EMAIL_VERIFICATION === 'true'
 export function hashSecret(value) {
   const pepper = process.env.VERIFICATION_CODE_PEPPER
   if (typeof pepper !== 'string' || pepper.length < 32) {

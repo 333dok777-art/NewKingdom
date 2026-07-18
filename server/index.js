@@ -9,7 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transaction } from './db.js'
 import { runMigrations } from './migrations.js'
-import { CODE_TTL_MS, MAX_ATTEMPTS, hashSecret, newCode, newSessionToken, normalizeEmail, normalizeUsername, registrationConflict, resendState, verificationPepperConfiguration, verificationState } from './verification.js'
+import { CODE_TTL_MS, MAX_ATTEMPTS, emailVerificationBypassEnabled, hashSecret, newCode, newSessionToken, normalizeEmail, normalizeUsername, registrationConflict, resendState, verificationPepperConfiguration, verificationState } from './verification.js'
 import { emailConfiguration, sendVerificationEmail } from './email.js'
 
 const app = express()
@@ -21,11 +21,13 @@ const cookieOptions = { httpOnly: true, sameSite: isProduction ? 'none' : 'lax',
 const genericError = { error: 'Unable to complete this request. Please try again.' }
 const startupEmailConfiguration = emailConfiguration()
 const startupVerificationPepperConfiguration = verificationPepperConfiguration()
+const bypassEmailVerification = emailVerificationBypassEnabled()
 
 if (!startupEmailConfiguration.enabled) console.warn(`Email delivery disabled. Missing or invalid: ${startupEmailConfiguration.missing.join(', ')}`)
 else console.info('Email delivery enabled.', { provider: 'resend', sender: startupEmailConfiguration.from, origin: startupEmailConfiguration.origin })
 if (!startupVerificationPepperConfiguration.configured) console.error('Server startup blocked: VERIFICATION_CODE_PEPPER must be set to a random value of at least 32 characters.')
 if (isProduction && startupEmailConfiguration.enabled && startupEmailConfiguration.origin.includes('localhost')) console.warn('APP_ORIGIN is set to localhost in production. Set it to the public frontend origin.')
+if (bypassEmailVerification) console.warn('Email verification bypass is enabled. New registrations become active immediately.')
 
 app.set('trust proxy', 1)
 app.use((request, response, next) => {
@@ -75,6 +77,13 @@ function validRegistration(body) {
   return { username, normalizedUsername: normalizeUsername(username), email, password, language }
 }
 
+function validLogin(body) {
+  const identity = typeof body.identity === 'string' ? body.identity.trim() : ''
+  const password = typeof body.password === 'string' ? body.password : ''
+  if (!identity || !password) return null
+  return { normalizedEmail: normalizeEmail(identity), normalizedUsername: normalizeUsername(identity), password }
+}
+
 function setVerificationCookie(response, token) { response.cookie(cookieName, token, cookieOptions) }
 function clearVerificationCookie(response) { response.clearCookie(cookieName, cookieOptions) }
 
@@ -85,13 +94,17 @@ app.post('/api/registration/start', startLimiter, startEmailLimiter, async (requ
     const result = await transaction(async (client) => {
       const existing = await client.query('SELECT * FROM accounts WHERE normalized_email = $1 OR normalized_username = $2 FOR UPDATE', [registration.email, registration.normalizedUsername])
       if (registrationConflict(existing.rows, registration.email, registration.normalizedUsername)) return { state: 'blocked' }
-      const code = newCode(); const token = newSessionToken(); const now = new Date(); const expires = new Date(now.getTime() + CODE_TTL_MS)
+      const code = bypassEmailVerification ? null : newCode(); const token = bypassEmailVerification ? null : newSessionToken(); const now = new Date(); const expires = bypassEmailVerification ? null : new Date(now.getTime() + CODE_TTL_MS)
       const passwordHash = await argon2.hash(registration.password, { type: argon2.argon2id })
       if (existing.rows.length) await client.query('DELETE FROM accounts WHERE id = ANY($1::uuid[])', [existing.rows.map((row) => row.id)])
-      await client.query(`INSERT INTO accounts (username, normalized_username, email, normalized_email, password_hash, preferred_language, status, terms_version, registration_ip, verification_code_hash, verification_session_hash, code_expires_at, resend_window_started_at) VALUES ($1,$2,$3,$4,$5,$6,'pending_email_verification',$7,$8,$9,$10,$11,$12)`, [registration.username, registration.normalizedUsername, registration.email, registration.email, passwordHash, registration.language, '2026-07', request.ip, hashSecret(code), hashSecret(token), expires, now])
-      return { state: 'ready', email: registration.email, language: registration.language, code, token, expiresAt: expires }
+      await client.query(`INSERT INTO accounts (username, normalized_username, email, normalized_email, password_hash, preferred_language, status, terms_version, registration_ip, verification_code_hash, verification_session_hash, code_expires_at, resend_window_started_at, verified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [registration.username, registration.normalizedUsername, registration.email, registration.email, passwordHash, registration.language, bypassEmailVerification ? 'verified_waiting_launch' : 'pending_email_verification', '2026-07', request.ip, code ? hashSecret(code) : null, token ? hashSecret(token) : null, expires, bypassEmailVerification ? null : now, bypassEmailVerification ? now : null])
+      return { state: 'ready', email: registration.email, language: registration.language, code, token, expiresAt: expires, verificationRequired: !bypassEmailVerification }
     })
     if (result.state !== 'ready') return safeRegistrationError(response, 409, 'This username or email cannot be used for a new registration.', 'registration_conflict', request.requestId)
+    if (!result.verificationRequired) {
+      console.info('Registration activated with development email bypass', { event: 'registration_email_bypassed', requestId: request.requestId })
+      return response.status(201).json({ ok: true, verificationRequired: false })
+    }
     await sendVerificationEmail(result)
     await transaction((client) => client.query('UPDATE accounts SET code_sent_at = now() WHERE verification_session_hash = $1', [hashSecret(result.token)]))
     setVerificationCookie(response, result.token)
@@ -100,6 +113,22 @@ app.post('/api/registration/start', startLimiter, startEmailLimiter, async (requ
     if (error.code === 'EMAIL_NOT_CONFIGURED') { console.error('Registration email is not configured.', { requestId: request.requestId }); return safeRegistrationError(response, 503, 'Email delivery is not configured on this server.', 'email_not_configured', request.requestId) }
     console.error('Registration start failed:', { requestId: request.requestId, code: error.code || error.name })
     return safeRegistrationError(response, 500, 'Registration is temporarily unavailable. Please try again later.', 'registration_failed', request.requestId)
+  }
+})
+
+app.post('/api/login', verifyLimiter, async (request, response) => {
+  const login = validLogin(request.body || {})
+  if (!login) return safeRegistrationError(response, 400, 'Please enter your username/email and password.', 'invalid_credentials', request.requestId)
+  try {
+    const { rows } = await transaction((client) => client.query('SELECT id, password_hash, status FROM accounts WHERE normalized_email = $1 OR normalized_username = $2 LIMIT 1', [login.normalizedEmail, login.normalizedUsername]))
+    const account = rows[0]
+    const passwordMatches = account ? await argon2.verify(account.password_hash, login.password) : false
+    if (!account || account.status !== 'verified_waiting_launch' || !passwordMatches) return safeRegistrationError(response, 401, 'Invalid username/email or password.', 'invalid_credentials', request.requestId)
+    console.info('Development login succeeded', { event: 'development_login_succeeded', requestId: request.requestId })
+    return response.json({ ok: true })
+  } catch (error) {
+    console.error('Login failed:', { requestId: request.requestId, code: error.code || error.name })
+    return safeRegistrationError(response, 500, 'Login is temporarily unavailable. Please try again later.', 'login_failed', request.requestId)
   }
 })
 

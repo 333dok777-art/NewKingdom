@@ -33,6 +33,7 @@ async function request(path, options = {}) {
 export const startRegistration = (payload) => request('/api/registration/start', { method: 'POST', body: JSON.stringify(payload) })
 export const verifyRegistration = (code) => request('/api/registration/verify', { method: 'POST', body: JSON.stringify({ code }) })
 export const resendRegistrationCode = () => request('/api/registration/resend', { method: 'POST', body: '{}' })
+export const loginAccount = (identity, password) => request('/api/login', { method: 'POST', body: JSON.stringify({ identity, password }) })
 
 export function registrationErrorMessage(error, language) {
   const english = language === 'en'

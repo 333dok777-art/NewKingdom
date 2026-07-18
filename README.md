@@ -11,6 +11,8 @@
 
 `VERIFICATION_CODE_PEPPER` is required and must be a random value of at least 32 characters. The production server refuses to start without it, because changing or generating this secret at runtime would invalidate verification-code hashes.
 
+For temporary development-only registration testing, set `BYPASS_EMAIL_VERIFICATION=true`. Registrations are then stored immediately as `verified_waiting_launch`, no verification email is sent, and the user is redirected to the coming-soon page. Keep this value `false` in normal production operation.
+
 ## Commands
 
 - `npm run dev` — Vite and Express together

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 process.env.VERIFICATION_CODE_PEPPER = 'test-pepper-only-not-for-production'
-const { MAX_ATTEMPTS, hashSecret, registrationConflict, resendState, verificationPepperConfiguration, verificationState } = await import('../server/verification.js')
+const { MAX_ATTEMPTS, emailVerificationBypassEnabled, hashSecret, registrationConflict, resendState, verificationPepperConfiguration, verificationState } = await import('../server/verification.js')
 const { buildVerificationEmail } = await import('../server/email.js')
 
 function account(overrides = {}) {
@@ -19,6 +19,15 @@ test('verification pepper must be configured before secret hashing', () => {
   assert.equal(verificationPepperConfiguration().configured, false)
   assert.throws(() => hashSecret('123456'), { code: 'VERIFICATION_PEPPER_NOT_CONFIGURED' })
   process.env.VERIFICATION_CODE_PEPPER = previous
+})
+
+test('email verification bypass is enabled only by the explicit development flag', () => {
+  const previous = process.env.BYPASS_EMAIL_VERIFICATION
+  delete process.env.BYPASS_EMAIL_VERIFICATION
+  assert.equal(emailVerificationBypassEnabled(), false)
+  process.env.BYPASS_EMAIL_VERIFICATION = 'true'
+  assert.equal(emailVerificationBypassEnabled(), true)
+  process.env.BYPASS_EMAIL_VERIFICATION = previous
 })
 
 test('wrong-code attempt limit locks verification', () => {
