@@ -2,7 +2,7 @@ import 'dotenv/config'
 import express from 'express'
 import helmet from 'helmet'
 import cookieParser from 'cookie-parser'
-import { rateLimit } from 'express-rate-limit'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import argon2 from 'argon2'
 import crypto from 'node:crypto'
 import path from 'node:path'
@@ -25,6 +25,7 @@ const startupVerificationPepperConfiguration = verificationPepperConfiguration()
 if (!startupEmailConfiguration.enabled) console.warn(`Email delivery disabled. Missing or invalid: ${startupEmailConfiguration.missing.join(', ')}`)
 else console.info('Email delivery enabled.', { provider: 'resend', sender: startupEmailConfiguration.from, origin: startupEmailConfiguration.origin })
 if (!startupVerificationPepperConfiguration.configured) console.error('Server startup blocked: VERIFICATION_CODE_PEPPER must be set to a random value of at least 32 characters.')
+if (isProduction && startupEmailConfiguration.enabled && startupEmailConfiguration.origin.includes('localhost')) console.warn('APP_ORIGIN is set to localhost in production. Set it to the public frontend origin.')
 
 app.set('trust proxy', 1)
 app.use((request, response, next) => {
@@ -52,12 +53,13 @@ app.use(express.json({ limit: '10kb' }))
 app.use(cookieParser())
 
 function rateLimitResponse(request, response, options) {
-  const retryAfterSeconds = Math.ceil(options.windowMs / 1000)
-  response.status(options.statusCode).json({ error: 'Too many requests. Please wait before trying again.', code: 'rate_limited', retryAfterSeconds, requestId: request.requestId })
+  const statusCode = Number.isInteger(options?.statusCode) ? options.statusCode : 429
+  const retryAfterSeconds = Math.ceil((Number.isFinite(options?.windowMs) ? options.windowMs : 15 * 60 * 1000) / 1000)
+  return response.status(statusCode).json({ error: 'Too many requests. Please wait before trying again.', code: 'rate_limited', retryAfterSeconds, requestId: request.requestId })
 }
 
 const startLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, handler: rateLimitResponse })
-const startEmailLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false, keyGenerator: (request) => normalizeEmail(typeof request.body?.email === 'string' ? request.body.email : '') || request.ip, handler: rateLimitResponse })
+const startEmailLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false, keyGenerator: (request) => normalizeEmail(typeof request.body?.email === 'string' ? request.body.email : '') || ipKeyGenerator(request.ip), handler: rateLimitResponse })
 const verifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, handler: rateLimitResponse })
 
 function safeRegistrationError(response, status, error, code, requestId) {
@@ -82,17 +84,11 @@ app.post('/api/registration/start', startLimiter, startEmailLimiter, async (requ
   try {
     const result = await transaction(async (client) => {
       const existing = await client.query('SELECT * FROM accounts WHERE normalized_email = $1 OR normalized_username = $2 FOR UPDATE', [registration.email, registration.normalizedUsername])
-      const emailAccount = existing.rows.find((row) => row.normalized_email === registration.email)
-      const usernameAccount = existing.rows.find((row) => row.normalized_username === registration.normalizedUsername)
-      if (registrationConflict(existing.rows, registration.email, registration.normalizedUsername) || (usernameAccount && usernameAccount.normalized_email !== registration.email)) return { state: 'blocked' }
+      if (registrationConflict(existing.rows, registration.email, registration.normalizedUsername)) return { state: 'blocked' }
       const code = newCode(); const token = newSessionToken(); const now = new Date(); const expires = new Date(now.getTime() + CODE_TTL_MS)
       const passwordHash = await argon2.hash(registration.password, { type: argon2.argon2id })
-      const account = emailAccount || usernameAccount
-      if (account) {
-        await client.query(`UPDATE accounts SET username=$1, normalized_username=$2, email=$3, normalized_email=$4, password_hash=$5, preferred_language=$6, terms_version=$7, registration_ip=$8, verification_code_hash=$9, verification_session_hash=$10, code_expires_at=$11, code_sent_at=NULL, verification_attempts=0, resend_count=0, resend_window_started_at=$12 WHERE id=$13`, [registration.username, registration.normalizedUsername, registration.email, registration.email, passwordHash, registration.language, '2026-07', request.ip, hashSecret(code), hashSecret(token), expires, now, account.id])
-      } else {
-        await client.query(`INSERT INTO accounts (username, normalized_username, email, normalized_email, password_hash, preferred_language, status, terms_version, registration_ip, verification_code_hash, verification_session_hash, code_expires_at, resend_window_started_at) VALUES ($1,$2,$3,$4,$5,$6,'pending_email_verification',$7,$8,$9,$10,$11,$12)`, [registration.username, registration.normalizedUsername, registration.email, registration.email, passwordHash, registration.language, '2026-07', request.ip, hashSecret(code), hashSecret(token), expires, now])
-      }
+      if (existing.rows.length) await client.query('DELETE FROM accounts WHERE id = ANY($1::uuid[])', [existing.rows.map((row) => row.id)])
+      await client.query(`INSERT INTO accounts (username, normalized_username, email, normalized_email, password_hash, preferred_language, status, terms_version, registration_ip, verification_code_hash, verification_session_hash, code_expires_at, resend_window_started_at) VALUES ($1,$2,$3,$4,$5,$6,'pending_email_verification',$7,$8,$9,$10,$11,$12)`, [registration.username, registration.normalizedUsername, registration.email, registration.email, passwordHash, registration.language, '2026-07', request.ip, hashSecret(code), hashSecret(token), expires, now])
       return { state: 'ready', email: registration.email, language: registration.language, code, token, expiresAt: expires }
     })
     if (result.state !== 'ready') return safeRegistrationError(response, 409, 'This username or email cannot be used for a new registration.', 'registration_conflict', request.requestId)

@@ -24,6 +24,8 @@ Create a Railway PostgreSQL service and copy its connection string into `DATABAS
 
 For Resend, verify a sender domain, add its DNS records, create a sending-access API key, then set `EMAIL_FROM` to an address on that domain and set `RESEND_API_KEY` only in Railway's environment settings.
 
+On Railway, set `APP_ORIGIN` to the public frontend URL. For the combined Railway deployment this is `https://newkingdom-production.up.railway.app`, not `http://localhost:5173`. `onboarding@resend.dev` is for Resend testing and can only deliver to the account owner; production registrations require a verified Resend domain and an `EMAIL_FROM` address on that domain.
+
 ## Local frontend with Railway API
 
 When Vite runs locally but the API runs on Railway, create `.env.local` with the public Railway service origin (no trailing `/api`):

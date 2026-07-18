@@ -41,7 +41,5 @@ export function resendState(account, now = new Date()) {
 }
 
 export function registrationConflict(rows, email, username) {
-  const matchingEmail = rows.find((row) => row.normalized_email === email)
-  const matchingUsername = rows.find((row) => row.normalized_username === username)
-  return rows.some((row) => row.status === 'verified_waiting_launch') || (matchingEmail && matchingUsername && matchingEmail.id !== matchingUsername.id)
+  return rows.some((row) => row.status === 'verified_waiting_launch')
 }

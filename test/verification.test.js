@@ -41,6 +41,11 @@ test('duplicate verified emails cannot be replaced by registration', () => {
   assert.equal(registrationConflict(rows, 'queen@example.com', 'queen'), true)
 })
 
+test('pending registrations do not block a replacement registration', () => {
+  const rows = [{ id: 'pending', normalized_email: 'queen@example.com', normalized_username: 'queen', status: 'pending_email_verification' }]
+  assert.equal(registrationConflict(rows, 'queen@example.com', 'queen'), false)
+})
+
 test('English verification email includes branded code, expiry, and app link', () => {
   const email = buildVerificationEmail({ code: '123456', language: 'en', expiresAt: new Date('2026-07-18T12:00:00Z'), origin: 'https://newkingdom.example' })
   assert.match(email.subject, /verification code/)

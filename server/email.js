@@ -41,11 +41,23 @@ export async function sendVerificationEmail({ email, code, language, expiresAt }
     const content = buildVerificationEmail({ code, language, expiresAt, origin: configuration.origin })
     const resend = new Resend(process.env.RESEND_API_KEY)
     const { data, error } = await resend.emails.send({ from: configuration.from, to: [email], subject: content.subject, html: content.html, text: content.text })
-    if (error) throw new Error('provider rejected email')
+    if (error) {
+      const providerError = new Error(error.message || 'Resend rejected email delivery')
+      providerError.code = 'EMAIL_DELIVERY_FAILED'
+      providerError.provider = { statusCode: error.statusCode, name: error.name, message: error.message }
+      throw providerError
+    }
     console.info('Verification email sent', { event: 'verification_email_sent', recipientDomain: recipientDomain(email), providerMessageId: data?.id || 'unknown' })
     return data
   } catch (cause) {
-    console.warn('Verification email failed', { event: 'verification_email_failed', recipientDomain: recipientDomain(email), reason: cause.message })
+    const provider = cause.provider || {}
+    console.warn('Verification email failed', {
+      event: 'verification_email_failed',
+      recipientDomain: recipientDomain(email),
+      statusCode: Number.isInteger(provider.statusCode) ? provider.statusCode : undefined,
+      errorName: provider.name || cause.name,
+      message: provider.message || cause.message,
+    })
     const error = new Error('Email delivery failed')
     error.code = 'EMAIL_DELIVERY_FAILED'
     throw error
