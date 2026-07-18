@@ -8,7 +8,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transaction } from './db.js'
 import { CODE_TTL_MS, MAX_ATTEMPTS, hashSecret, newCode, newSessionToken, normalizeEmail, normalizeUsername, registrationConflict, resendState, verificationState } from './verification.js'
-import { sendVerificationEmail } from './email.js'
+import { emailConfiguration, sendVerificationEmail } from './email.js'
 
 const app = express()
 const isProduction = process.env.NODE_ENV === 'production'
@@ -16,6 +16,10 @@ const port = Number(process.env.PORT || process.env.API_PORT || 3001)
 const cookieName = 'nk_verify'
 const cookieOptions = { httpOnly: true, sameSite: 'lax', secure: isProduction, path: '/api/registration', maxAge: CODE_TTL_MS }
 const genericError = { error: 'Unable to complete this request. Please try again.' }
+const startupEmailConfiguration = emailConfiguration()
+
+if (!startupEmailConfiguration.enabled) console.warn(`Email delivery disabled. Missing or invalid: ${startupEmailConfiguration.missing.join(', ')}`)
+else console.info('Email delivery enabled.', { provider: 'resend', sender: startupEmailConfiguration.from, origin: startupEmailConfiguration.origin })
 
 app.set('trust proxy', 1)
 app.use(helmet())
@@ -54,7 +58,7 @@ app.post('/api/registration/start', startLimiter, async (request, response) => {
       } else {
         await client.query(`INSERT INTO accounts (username, normalized_username, email, normalized_email, password_hash, preferred_language, status, terms_version, registration_ip, verification_code_hash, verification_session_hash, code_expires_at, resend_window_started_at) VALUES ($1,$2,$3,$4,$5,$6,'pending_email_verification',$7,$8,$9,$10,$11,$12)`, [registration.username, registration.normalizedUsername, registration.email, registration.email, passwordHash, registration.language, '2026-07', request.ip, hashSecret(code), hashSecret(token), expires, now])
       }
-      return { state: 'ready', email: registration.email, language: registration.language, code, token }
+      return { state: 'ready', email: registration.email, language: registration.language, code, token, expiresAt: expires }
     })
     if (result.state !== 'ready') return response.status(409).json(genericError)
     await sendVerificationEmail(result)
@@ -83,6 +87,7 @@ app.post('/api/registration/verify', verifyLimiter, async (request, response) =>
     })
     if (outcome !== 'verified') return response.status(400).json(genericError)
     clearVerificationCookie(response)
+    console.info('Email verification succeeded', { event: 'verification_succeeded' })
     return response.json({ ok: true })
   } catch (error) { console.error('Registration verification failed:', error.code || error.name); return response.status(500).json(genericError) }
 })
@@ -97,9 +102,12 @@ app.post('/api/registration/resend', startLimiter, async (request, response) => 
       if (limit.state !== 'valid') return limit
       const code = newCode(); const now = new Date(); const sameWindow = account.resend_window_started_at && now - new Date(account.resend_window_started_at) < 60 * 60 * 1000
       await client.query('UPDATE accounts SET verification_code_hash=$1, code_expires_at=$2, verification_attempts=0, resend_count=$3, resend_window_started_at=$4, code_sent_at=now() WHERE id=$5', [hashSecret(code), new Date(now.getTime() + CODE_TTL_MS), sameWindow ? account.resend_count + 1 : 1, sameWindow ? account.resend_window_started_at : now, account.id])
-      return { state: 'ready', email: account.normalized_email, language: account.preferred_language, code }
+      return { state: 'ready', email: account.normalized_email, language: account.preferred_language, code, expiresAt: new Date(now.getTime() + CODE_TTL_MS) }
     })
-    if (result.state !== 'ready') return response.status(429).json({ error: genericError.error, cooldownSeconds: result.cooldownSeconds || 0 })
+    if (result.state !== 'ready') {
+      if (result.state === 'cooldown') console.info('Verification resend blocked by cooldown', { event: 'verification_resend_cooldown', cooldownSeconds: result.cooldownSeconds })
+      return response.status(429).json({ error: genericError.error, cooldownSeconds: result.cooldownSeconds || 0 })
+    }
     await sendVerificationEmail(result)
     return response.json({ ok: true, cooldownSeconds: 60 })
   } catch (error) {
