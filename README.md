@@ -18,7 +18,7 @@
 
 ## Railway deployment outline
 
-Create a Railway PostgreSQL service and copy its connection string into `DATABASE_URL`. Create one Railway Node service from this repository with the same environment variables as `.env.example`, set the build command to `npm run build`, and set the start command to `npm start`. Express serves the built Vite app and `/api` from the same origin in production. Run `npm run migrate` once through a Railway shell after setting the database variable.
+Create a Railway PostgreSQL service and copy its connection string into `DATABASE_URL`. Create one Railway Node service from this repository with the same environment variables as `.env.example`, set the build command to `npm run build`, and set the start command to `npm start`. Express serves the built Vite app and `/api` from the same origin in production. The API runs idempotent, transactionally tracked migrations automatically before it accepts traffic; `npm run migrate` remains available for manual checks.
 
 For Resend, verify a sender domain, add its DNS records, create a sending-access API key, then set `EMAIL_FROM` to an address on that domain and set `RESEND_API_KEY` only in Railway's environment settings.
 

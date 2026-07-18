@@ -7,6 +7,7 @@ import argon2 from 'argon2'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transaction } from './db.js'
+import { runMigrations } from './migrations.js'
 import { CODE_TTL_MS, MAX_ATTEMPTS, hashSecret, newCode, newSessionToken, normalizeEmail, normalizeUsername, registrationConflict, resendState, verificationState } from './verification.js'
 import { emailConfiguration, sendVerificationEmail } from './email.js'
 
@@ -141,4 +142,15 @@ if (isProduction) {
     return next()
   })
 }
-app.listen(port, () => console.log(`NewKingdom API listening on ${port}`))
+async function startServer() {
+  try {
+    const applied = await runMigrations()
+    console.info('Database schema ready.', { appliedMigrations: applied.length })
+    app.listen(port, () => console.log(`NewKingdom API listening on ${port}`))
+  } catch (error) {
+    console.error('Database schema initialization failed:', error.code || error.name)
+    process.exitCode = 1
+  }
+}
+
+startServer()
